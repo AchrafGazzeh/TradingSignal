@@ -2,29 +2,31 @@ import os
 import requests
 from robin_stocks import robinhood
 from flask import Flask, request, render_template_string
-from dotenv import load_dotenv
-
-load_dotenv()
+import configparser
 
 app = Flask(__name__)
 
 # -------------------------------------------------------------------
-# Environment variables
+# 1. Load config from config.ini
 # -------------------------------------------------------------------
-RH_USERNAME = os.getenv("ROBINHOOD_USERNAME")
-RH_PASSWORD = os.getenv("ROBINHOOD_PASSWORD")
-MFA_CODE = os.getenv("MFA_CODE")  # optional
+config = configparser.ConfigParser()
+config.read("config.ini")  
 
-MASTER_TRADE_SIGNAL_URL = os.getenv("MASTER_TRADE_SIGNAL_URL")
-USER_TOKEN = os.getenv("USER_TOKEN")
-SYMBOL = os.getenv("SYMBOL")
-
-AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
+RH_USERNAME = config.get("default", "ROBINHOOD_USERNAME", fallback="")
+RH_PASSWORD = config.get("default", "ROBINHOOD_PASSWORD", fallback="")
+MFA_CODE = config.get("default", "MFA_CODE", fallback="")
+MASTER_TRADE_SIGNAL_URL = config.get("default", "MASTER_TRADE_SIGNAL_URL", fallback="")
+USER_TOKEN = config.get("default", "USER_TOKEN", fallback="")
+SYMBOL = config.get("default", "SYMBOL", fallback="")
+AUTO_TRADE = config.getboolean("default", "AUTO_TRADE", fallback=False)
 
 # -------------------------------------------------------------------
-# Helper: login to Robinhood, optionally with MFA
+# 2. Login to Robinhood (helper)
 # -------------------------------------------------------------------
 def login_to_robinhood():
+    """
+    Logs into Robinhood. If MFA_CODE is present, we pass it.
+    """
     if MFA_CODE:
         robinhood.login(
             username=RH_USERNAME,
@@ -38,7 +40,7 @@ def login_to_robinhood():
         )
 
 # -------------------------------------------------------------------
-# HTML template
+# 3. HTML template
 # -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!doctype html>
@@ -76,20 +78,22 @@ HTML_TEMPLATE = """
 """
 
 # -------------------------------------------------------------------
-# Helper: The core trade logic
+# 4. Core trade logic
 # -------------------------------------------------------------------
 def do_trade_logic():
     """
     1. Log in to Robinhood
-    2. Request trade-signal from master
-    3. Parse and place order if needed
-    Returns (is_success, message) for display
+    2. POST to master /trade-signal
+    3. Parse the response, place limit order if BUY/SELL
+    Returns (success_boolean, message_string)
     """
+    # 1. Log in
     try:
         login_to_robinhood()
     except Exception as e:
         return False, f"Robinhood login failed: {str(e)}"
 
+    # 2. Call the master endpoint
     payload = {"token": USER_TOKEN, "symbol": SYMBOL}
     try:
         resp = requests.post(MASTER_TRADE_SIGNAL_URL, json=payload)
@@ -99,12 +103,13 @@ def do_trade_logic():
     if resp.status_code != 200:
         return False, f"Master returned error: {resp.text}"
 
-    signal = resp.json()
+    signal = resp.json()  # e.g. {"action":"BUY","symbol":"ZSC","quantity":1,"limitPrice":50.0}
     action = signal.get("action")
     limit_price = signal.get("limitPrice")
     quantity = signal.get("quantity", 1)
     symbol = signal.get("symbol")
 
+    # 3. Place the order if recognized
     try:
         if action == "BUY":
             robinhood.order_buy_limit(
@@ -120,21 +125,17 @@ def do_trade_logic():
             )
         else:
             return False, f"No valid action in signal: {action}"
+
     except Exception as e:
         return False, f"Order placement failed: {str(e)}"
 
     return True, "Subscribed successfully to trading strategy"
 
 # -------------------------------------------------------------------
-# Flask Routes
+# 5. Flask routes
 # -------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def home():
-    """
-    Renders the homepage with user info and two buttons:
-    - Start Trade
-    - Stop Trade
-    """
     return render_template_string(
         HTML_TEMPLATE,
         email=RH_USERNAME,
@@ -145,7 +146,6 @@ def home():
 
 @app.route("/trade", methods=["POST"])
 def trade():
-    """Triggered by the 'Start Trade' button."""
     success, msg = do_trade_logic()
     if success:
         return render_template_string(
@@ -167,8 +167,7 @@ def trade():
 @app.route("/stop-trade", methods=["POST"])
 def stop_trade():
     """
-    Dummy route. 
-    Just show a red message saying we unsubscribed.
+    Route to show unsubscribed message
     """
     return render_template_string(
         HTML_TEMPLATE,
@@ -179,7 +178,7 @@ def stop_trade():
     )
 
 # -------------------------------------------------------------------
-# Main Entry
+# 6. Main Entry
 # -------------------------------------------------------------------
 if __name__ == "__main__":
     if AUTO_TRADE:
@@ -190,5 +189,4 @@ if __name__ == "__main__":
         else:
             print("AUTO_TRADE error:", msg)
 
-    # Start the Flask server
     app.run(host="0.0.0.0", port=8000, debug=True)
